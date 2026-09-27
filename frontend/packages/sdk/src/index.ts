@@ -424,6 +424,29 @@ export interface Claim {
 
 import { Client as ProofRegistryClient } from "../../proof-registry/src/index";
 import { configure as configureSharedClaims } from "./claims";
+import {
+  isMockModeActive as _isMockModeActive,
+  _resolveMockIsVerified,
+  _resolveMockCheckClaim,
+  enableMockMode,
+  disableMockMode,
+  isMockModeActive,
+  configureMock,
+  getMockState,
+  clearMock,
+  MockProductionError,
+} from "./mock";
+
+export {
+  enableMockMode,
+  disableMockMode,
+  isMockModeActive,
+  configureMock,
+  getMockState,
+  clearMock,
+  MockProductionError,
+};
+export type { MockClaimState, MockClaimConfig } from "./mock";
 
 type StellarSDK = typeof import("@stellar/stellar-sdk");
 let _sdk: Promise<StellarSDK> | null = null;
@@ -569,6 +592,22 @@ async function readIsVerified(
   throwOnError = false,
   requestTimeoutMs = _config.requestTimeoutMs,
 ): Promise<{ valid: boolean; verifiedAt: number; expiry: number } | null> {
+  // In mock mode, skip client construction entirely.
+  if (_isMockModeActive()) {
+    try {
+      const mock = _resolveMockIsVerified(wallet, claimType);
+      // "not_mock" is unreachable here (we just checked _isMockModeActive),
+      // but the type demands a guard.
+      if (mock !== "not_mock") return mock;
+      return null;
+    } catch (err) {
+      if (throwOnError) {
+        throw new RpcError(`is_verified RPC failed for claim "${claimType}"`, { cause: err });
+      }
+      return null;
+    }
+  }
+
   const client = await getClient(throwOnError);
   if (!client) return null;
 
@@ -603,6 +642,20 @@ async function readCheckClaim(
   throwOnError = false,
   requestTimeoutMs = _config.requestTimeoutMs,
 ): Promise<boolean> {
+  // In mock mode, skip client construction entirely.
+  if (_isMockModeActive()) {
+    try {
+      const mock = _resolveMockCheckClaim(wallet, claimType, minThreshold);
+      if (mock !== "not_mock") return mock;
+      return false;
+    } catch (err) {
+      if (throwOnError) {
+        throw new RpcError(`check_claim RPC failed for claim "${claimType}"`, { cause: err });
+      }
+      return false;
+    }
+  }
+
   const client = await getClient(throwOnError);
   if (!client) return false;
 
@@ -683,20 +736,26 @@ export async function hasClaim(
   warnIfMissingRegistryIdOnce();
   const throwOnError = opts?.throwOnError === true;
 
+  // In mock mode any wallet identifier is accepted — integrators use
+  // arbitrary strings and we never touch the chain anyway.
   let normalizedWallet: string;
-  try {
-    normalizedWallet = await normalizeAndValidateWallet(wallet);
-  } catch (err) {
-    if (err instanceof InvalidAddressError) {
-      if (throwOnError) throw err;
+  if (_isMockModeActive()) {
+    normalizedWallet = wallet;
+  } else {
+    try {
+      normalizedWallet = await normalizeAndValidateWallet(wallet);
+    } catch (err) {
+      if (err instanceof InvalidAddressError) {
+        if (throwOnError) throw err;
+        return false;
+      }
+      // Loading the Stellar SDK itself failed. Treat this like the existing
+      // fail-soft/RPC path rather than misclassifying it as invalid input.
+      if (throwOnError) {
+        throw new RpcError("Failed to validate Stellar address", { cause: err });
+      }
       return false;
     }
-    // Loading the Stellar SDK itself failed. Treat this like the existing
-    // fail-soft/RPC path rather than misclassifying it as invalid input.
-    if (throwOnError) {
-      throw new RpcError("Failed to validate Stellar address", { cause: err });
-    }
-    return false;
   }
 
   if (opts?.minThreshold !== undefined) {
@@ -751,10 +810,14 @@ export async function getClaim(
   warnIfMissingRegistryIdOnce();
 
   let normalizedWallet: string;
-  try {
-    normalizedWallet = await normalizeAndValidateWallet(wallet);
-  } catch {
-    return null;
+  if (_isMockModeActive()) {
+    normalizedWallet = wallet;
+  } else {
+    try {
+      normalizedWallet = await normalizeAndValidateWallet(wallet);
+    } catch {
+      return null;
+    }
   }
 
   const r = await readIsVerified(
@@ -822,15 +885,19 @@ export async function hasClaims(
   const results: Partial<Record<ClaimType, boolean>> = {};
 
   let normalizedWallet: string;
-  try {
-    normalizedWallet = await normalizeAndValidateWallet(wallet);
-  } catch {
-    // Preserve the fail-soft batch contract: each requested type is false,
-    // and importantly no client/RPC read is attempted.
-    for (const type of unique) {
-      results[type] = false;
+  if (_isMockModeActive()) {
+    normalizedWallet = wallet;
+  } else {
+    try {
+      normalizedWallet = await normalizeAndValidateWallet(wallet);
+    } catch {
+      // Preserve the fail-soft batch contract: each requested type is false,
+      // and importantly no client/RPC read is attempted.
+      for (const type of unique) {
+        results[type] = false;
+      }
+      return results;
     }
-    return results;
   }
 
   await fanOut(unique, async (t) => {
@@ -937,17 +1004,21 @@ export async function getClaims(
   const throwOnError = opts?.throwOnError === true;
 
   let normalizedWallet: string;
-  try {
-    normalizedWallet = await normalizeAndValidateWallet(wallet);
-  } catch (err) {
-    if (err instanceof InvalidAddressError) {
-      if (throwOnError) throw err;
+  if (_isMockModeActive()) {
+    normalizedWallet = wallet;
+  } else {
+    try {
+      normalizedWallet = await normalizeAndValidateWallet(wallet);
+    } catch (err) {
+      if (err instanceof InvalidAddressError) {
+        if (throwOnError) throw err;
+        return [];
+      }
+      if (throwOnError) {
+        throw new RpcError("Failed to validate Stellar address", { cause: err });
+      }
       return [];
     }
-    if (throwOnError) {
-      throw new RpcError("Failed to validate Stellar address", { cause: err });
-    }
-    return [];
   }
 
   const results = await fanOut(CLAIM_TYPES, async (t) => {
@@ -1334,6 +1405,14 @@ export const StellarCred = {
   ConfigError,
   InvalidAddressError,
   RpcError,
+  // ── Dry-run / mock mode ────────────────────────────────────────────────
+  enableMockMode,
+  disableMockMode,
+  isMockModeActive,
+  configureMock,
+  getMockState,
+  clearMock,
+  MockProductionError,
 };
 export default StellarCred;
 
