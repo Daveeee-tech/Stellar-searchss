@@ -25,6 +25,12 @@ export const HORIZON_TESTNET = 'https://horizon-testnet.stellar.org'
 export const HORIZON_MAINNET = 'https://horizon.stellar.org'
 export const HORIZON_URL = IS_MAINNET ? HORIZON_MAINNET : HORIZON_TESTNET
 
+export function getHorizonUrl(network: string): string {
+  return network === 'PUBLIC' || network === 'stellar:mainnet'
+    ? HORIZON_MAINNET
+    : HORIZON_TESTNET
+}
+
 // Explorer
 export const STELLAR_EXPERT_TESTNET = 'https://stellar.expert/explorer/testnet'
 export const STELLAR_EXPERT_MAINNET = 'https://stellar.expert/explorer/public'
@@ -34,6 +40,12 @@ export const STELLAR_EXPERT_URL = IS_MAINNET ? STELLAR_EXPERT_MAINNET : STELLAR_
 export const USDC_ISSUER_TESTNET = 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5'
 export const USDC_ISSUER_MAINNET = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN'
 export const USDC_ISSUER = IS_MAINNET ? USDC_ISSUER_MAINNET : USDC_ISSUER_TESTNET
+
+export function getUsdcIssuer(network: string): string {
+  return network === 'PUBLIC' || network === 'stellar:mainnet'
+    ? USDC_ISSUER_MAINNET
+    : USDC_ISSUER_TESTNET
+}
 
 // USDC Soroban Contract (for x402)
 export const USDC_CONTRACT_TESTNET = 'CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA'

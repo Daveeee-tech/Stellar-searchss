@@ -4,7 +4,7 @@
  * Fetches live balances from Stellar Horizon
  */
 
-import { useState, useCallback, useEffect } from 'react'
+import { useState, useCallback, useEffect, useMemo, useRef } from 'react'
 import {
   isConnected,
   requestAccess,
@@ -12,7 +12,7 @@ import {
   getNetwork,
 } from '@stellar/freighter-api'
 import { Horizon } from '@stellar/stellar-sdk'
-import { HORIZON_URL, USDC_ISSUER } from '../lib/stellar'
+import { getHorizonUrl, getUsdcIssuer } from '../lib/stellar'
 
 export interface WalletState {
   publicKey: string | null
@@ -36,8 +36,6 @@ export interface StellarTransaction {
   memo?: string
 }
 
-const horizon = new Horizon.Server(HORIZON_URL)
-
 export function useFreighterWallet() {
   const [wallet, setWallet] = useState<WalletState>({
     publicKey: null,
@@ -50,9 +48,17 @@ export function useFreighterWallet() {
   })
   const [transactions, setTransactions] = useState<StellarTransaction[]>([])
   const [txLoading, setTxLoading] = useState(false)
+  const requestId = useRef(0)
+  const activeWallet = useRef({ publicKey: wallet.publicKey, network: wallet.network })
+  activeWallet.current = { publicKey: wallet.publicKey, network: wallet.network }
+  const horizon = useMemo(
+    () => new Horizon.Server(getHorizonUrl(wallet.network)),
+    [wallet.network]
+  )
+  const usdcIssuer = getUsdcIssuer(wallet.network)
 
   // Fetch real balances from Horizon
-  const fetchBalances = useCallback(async (publicKey: string) => {
+  const fetchBalances = useCallback(async (publicKey: string, fetchId: number) => {
     try {
       const account = await horizon.loadAccount(publicKey)
 
@@ -65,28 +71,36 @@ export function useFreighterWallet() {
         } else if (
           balance.asset_type === 'credit_alphanum4' &&
           (balance as any).asset_code === 'USDC' &&
-          (balance as any).asset_issuer === USDC_ISSUER
+          (balance as any).asset_issuer === usdcIssuer
         ) {
           usdc = parseFloat(balance.balance).toFixed(6)
         }
       }
 
-      setWallet(prev => ({
-        ...prev,
-        xlmBalance: xlm,
-        usdcBalance: usdc,
-        error: null,
-      }))
+      if (
+        requestId.current === fetchId &&
+        activeWallet.current.publicKey === publicKey &&
+        activeWallet.current.network === wallet.network
+      ) {
+        setWallet(prev => prev.network === wallet.network && prev.publicKey === publicKey
+          ? { ...prev, xlmBalance: xlm, usdcBalance: usdc, error: null }
+          : prev)
+      }
     } catch (err: any) {
-      setWallet(prev => ({
-        ...prev,
-        error: err.message || 'Failed to load account',
-      }))
+      if (
+        requestId.current === fetchId &&
+        activeWallet.current.publicKey === publicKey &&
+        activeWallet.current.network === wallet.network
+      ) {
+        setWallet(prev => prev.network === wallet.network && prev.publicKey === publicKey
+          ? { ...prev, error: err.message || 'Failed to load account' }
+          : prev)
+      }
     }
-  }, [])
+  }, [horizon, usdcIssuer, wallet.network])
 
   // Fetch real transaction history from Horizon
-  const fetchTransactions = useCallback(async (publicKey: string) => {
+  const fetchTransactions = useCallback(async (publicKey: string, fetchId: number) => {
     setTxLoading(true)
     try {
       const ops = await horizon
@@ -113,13 +127,25 @@ export function useFreighterWallet() {
           memo: op.transaction?.memo,
         }))
 
-      setTransactions(txs)
+      if (
+        requestId.current === fetchId &&
+        activeWallet.current.publicKey === publicKey &&
+        activeWallet.current.network === wallet.network
+      ) setTransactions(txs)
     } catch (_) {
-      setTransactions([])
+      if (
+        requestId.current === fetchId &&
+        activeWallet.current.publicKey === publicKey &&
+        activeWallet.current.network === wallet.network
+      ) setTransactions([])
     } finally {
-      setTxLoading(false)
+      if (
+        requestId.current === fetchId &&
+        activeWallet.current.publicKey === publicKey &&
+        activeWallet.current.network === wallet.network
+      ) setTxLoading(false)
     }
-  }, [])
+  }, [horizon])
 
   // Connect Freighter wallet
   const connect = useCallback(async () => {
@@ -155,9 +181,6 @@ export function useFreighterWallet() {
         error: null,
       }))
 
-      // Fetch live data after connect
-      await fetchBalances(addressResult.address)
-      await fetchTransactions(addressResult.address)
     } catch (err: any) {
       setWallet(prev => ({
         ...prev,
@@ -166,9 +189,10 @@ export function useFreighterWallet() {
         error: err.message || 'Connection failed',
       }))
     }
-  }, [fetchBalances, fetchTransactions])
+  }, [])
 
   const disconnect = useCallback(() => {
+    requestId.current += 1
     setWallet({
       publicKey: null,
       connected: false,
@@ -183,10 +207,56 @@ export function useFreighterWallet() {
 
   const refresh = useCallback(async () => {
     if (wallet.publicKey) {
-      await fetchBalances(wallet.publicKey)
-      await fetchTransactions(wallet.publicKey)
+      const networkResult = await getNetwork()
+      const network = networkResult.network || wallet.network
+      if (network !== wallet.network) {
+        setWallet(prev => ({ ...prev, network }))
+        return
+      }
+      const fetchId = ++requestId.current
+      await Promise.all([
+        fetchBalances(wallet.publicKey, fetchId),
+        fetchTransactions(wallet.publicKey, fetchId),
+      ])
     }
-  }, [wallet.publicKey, fetchBalances, fetchTransactions])
+  }, [wallet.publicKey, wallet.network, fetchBalances, fetchTransactions])
+
+  // Re-fetch on account/network changes, discarding any previous network's data.
+  useEffect(() => {
+    const fetchId = ++requestId.current
+    setWallet(prev => ({ ...prev, xlmBalance: '0', usdcBalance: '0', error: null }))
+    setTransactions([])
+
+    if (wallet.publicKey) {
+      fetchBalances(wallet.publicKey, fetchId)
+      fetchTransactions(wallet.publicKey, fetchId)
+    } else {
+      setTxLoading(false)
+    }
+  }, [wallet.publicKey, wallet.network, fetchBalances, fetchTransactions])
+
+  // Freighter does not expose a network-change event, so observe its active network.
+  useEffect(() => {
+    if (!wallet.connected) return
+
+    let cancelled = false
+    const syncNetwork = async () => {
+      try {
+        const result = await getNetwork()
+        if (!cancelled && result.network && result.network !== wallet.network) {
+          setWallet(prev => ({ ...prev, network: result.network! }))
+        }
+      } catch {
+        // Ignore transient Freighter availability errors.
+      }
+    }
+
+    const interval = window.setInterval(syncNetwork, 5000)
+    return () => {
+      cancelled = true
+      window.clearInterval(interval)
+    }
+  }, [wallet.connected, wallet.network])
 
   // Auto-check if already connected on mount
   useEffect(() => {
@@ -203,8 +273,6 @@ export function useFreighterWallet() {
               connected: true,
               network: net.network || 'TESTNET',
             }))
-            fetchBalances(addr.address)
-            fetchTransactions(addr.address)
           }
         }
       } catch {
@@ -212,7 +280,7 @@ export function useFreighterWallet() {
       }
     }
     check()
-  }, [fetchBalances, fetchTransactions])
+  }, [])
 
   return {
     wallet,
