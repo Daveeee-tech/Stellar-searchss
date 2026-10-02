@@ -8,7 +8,37 @@ export interface ApiStat {
   uptime: string
 }
 
-// Injected by Vite at build time from package.json → version.
-// See vite.config.ts `define: { __APP_VERSION__ }`.
-declare const __APP_VERSION__: string
+export interface HealthResponse {
+  status: string
+  totalQueries: number
+  totalUsdcSettled: string | number
+  avgLatencyMs: number
+  uptime: string
+  serperApiConfigured?: boolean
+  groqApiConfigured?: boolean
+  receivingAddressConfigured?: boolean
+}
+
+export class HealthResponseValidationError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'HealthResponseValidationError'
+  }
+}
+
+export function parseHealthResponse(data: any): HealthResponse {
+  if (!data || typeof data !== 'object') {
+    throw new HealthResponseValidationError('Invalid health response format')
+  }
+  return {
+    status: data.status ?? 'ok',
+    totalQueries: data.totalQueries ?? 0,
+    totalUsdcSettled: data.totalUsdcSettled ?? '0.000',
+    avgLatencyMs: data.avgLatencyMs ?? 0,
+    uptime: data.uptime ?? '100%',
+    serperApiConfigured: Boolean(data.serperApiConfigured),
+    groqApiConfigured: Boolean(data.groqApiConfigured),
+    receivingAddressConfigured: Boolean(data.receivingAddressConfigured),
+  }
+}
 
